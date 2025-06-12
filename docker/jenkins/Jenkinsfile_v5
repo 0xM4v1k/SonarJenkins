@@ -14,19 +14,16 @@ pipeline {
                     echo "Limpiando workspace..."
                     cleanWs()
                     echo "Clonando repositorio..."
+                    // He actualizado la URL a la que me diste en el último Jenkinsfile
                     git branch: 'master', url: 'https://github.com/0xM4v1k/ecommerce_Dockerizado.git'
 
                     echo "Verificando estructura de 'sql/' DESPUÉS del clone en el workspace de Jenkins:"
                     sh 'ls -la sql/'
                     sh '''
-                        if [ -d "sql/init.sql" ]; then
-                          echo "ERROR: sql/init.sql ES UN DIRECTORIO en el workspace de Jenkins."
-                        elif [ -f "sql/init.sql" ]; then
+                        if [ -f "sql/init.sql" ]; then
                           echo "OK: sql/init.sql ES UN ARCHIVO en el workspace de Jenkins."
-                          echo "Primeras líneas de sql/init.sql en el workspace:"
-                          head -n 5 sql/init.sql
                         else
-                          echo "ADVERTENCIA: sql/init.sql no es ni un archivo ni un directorio, o no existe."
+                          echo "ADVERTENCIA: sql/init.sql no se encontró o no es un archivo."
                         fi
                     '''
                 }
@@ -58,6 +55,7 @@ pipeline {
         stage('Quality Gate') {
             steps {
                 timeout(time: 10, unit: 'MINUTES') {
+                    // Si sigue dando problemas, recuerda que puedes usar 'useWebhook: false'
                     waitForQualityGate abortPipeline: true
                 }
             }
@@ -83,29 +81,20 @@ pipeline {
                             echo "Continuando con el despliegue..."
                         }
                         
-                        // Mantenemos las verificaciones para confirmar que todo sigue bien antes del 'up'
-                        echo "Verificando estructura de '../sql/' DESDE el directorio 'docker/' ANTES del docker-compose up:"
+                        // Esta verificación sigue siendo útil para asegurar que el script existe antes de la construcción
+                        echo "Verificando estructura de '../sql/' ANTES del docker-compose up:"
                         sh 'ls -la ../sql/'
-                        sh '''
-                            if [ -f "../sql/init.sql" ]; then
-                              echo "OK PIPELINE: ../sql/init.sql ES UN ARCHIVO justo antes del montaje."
-                            else
-                              echo "ADVERTENCIA PIPELINE: ../sql/init.sql NO ES UN ARCHIVO justo antes del montaje."
-                            fi
-                        '''
-
+                        
                         // ---------------------------------------------------------------------
-                        // --- CAMBIO CLAVE: Usar ruta absoluta para el volumen SQL ---
+                        // --- CAMBIO APLICADO: LÓGICA SIMPLIFICADA ---
                         // ---------------------------------------------------------------------
-                        // En lugar de llamar a 'docker-compose up' directamente, lo hacemos
-                        // dentro de un bloque 'sh' que primero exporta la variable de entorno
-                        // SQL_INIT_PATH. Esta variable contiene la ruta absoluta a tu carpeta 'sql'.
-                        // La variable ${WORKSPACE} es proporcionada por Jenkins automáticamente.
-                        echo "Construyendo imágenes y levantando servicios con ruta absoluta para el script SQL..."
-                        sh """
-                            export SQL_INIT_PATH=${WORKSPACE}/sql
-                            docker-compose -p ${dockerProjectName} up -d --build
-                        """
+                        // Ya no necesitamos exportar ninguna variable de entorno.
+                        // El comando 'docker-compose up --build' ahora se encargará de:
+                        // 1. Encontrar el 'docker/mysql/Dockerfile'.
+                        // 2. Construir la imagen de MySQL, copiando el 'init.sql' dentro de ella.
+                        // 3. Levantar todos los servicios.
+                        echo "Construyendo imágenes (incluida la de MySQL con el script) y levantando servicios..."
+                        sh "docker-compose -p ${dockerProjectName} up -d --build"
                         // ---------------------------------------------------------------------
                         // --- FIN DEL CAMBIO ---
                         // ---------------------------------------------------------------------
@@ -115,12 +104,10 @@ pipeline {
                         echo "Esperando a que los servicios se estabilicen (60 segundos)..."
                         sleep(60)
                         
-                        echo "Verificando el script montado DENTRO del contenedor MySQL (AHORA DEBERÍA FUNCIONAR):"
+                        echo "Verificando que el script existe DENTRO del contenedor MySQL (¡Ahora sí debería funcionar!):"
                         sh "docker exec mysql-ecommerce-prod ls -l /docker-entrypoint-initdb.d/"
                         
                         sh '''docker exec mysql-ecommerce-prod sh -c 'if [ -f /docker-entrypoint-initdb.d/init.sql ]; then echo "¡ÉXITO! CONTENEDOR: init.sql ES UN ARCHIVO"; else echo "FALLO. CONTENEDOR: init.sql NO SE ENCONTRÓ O NO ES UN ARCHIVO"; fi' '''
-                        
-                        sh "docker exec mysql-ecommerce-prod sh -c 'if [ -f /docker-entrypoint-initdb.d/init.sql ]; then cat /docker-entrypoint-initdb.d/init.sql | head -n 10; else echo \"No se puede mostrar cat porque no es un archivo.\"; fi' "
                         
                         echo "Logs del contenedor MySQL (mysql-ecommerce-prod) después del 'up':"
                         sh "docker logs mysql-ecommerce-prod"
