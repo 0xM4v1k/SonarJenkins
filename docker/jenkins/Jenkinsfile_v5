@@ -17,9 +17,7 @@ pipeline {
                     git branch: 'master', url: 'https://github.com/arlysanchez/ecommerce_Dockerizado.git'
 
                     echo "Verificando estructura de 'sql/' DESPUÉS del clone en el workspace de Jenkins:"
-                    sh 'ls -la sql/' // Muestra el contenido detallado de la carpeta sql
-                    // Si 'init.sql' es un directorio aquí, este es el problema raíz.
-                    // También puedes intentar ver el tipo con algo que no sea 'file' si no está:
+                    sh 'ls -la sql/'
                     sh '''
                         if [ -d "sql/init.sql" ]; then
                           echo "ERROR: sql/init.sql ES UN DIRECTORIO en el workspace de Jenkins."
@@ -36,53 +34,46 @@ pipeline {
         }
         stage('Build') {
             steps {
-                timeout(time: 10, unit: 'MINUTES') { // Aumentado un poco por si acaso
+                timeout(time: 10, unit: 'MINUTES') {
                     sh "mvn -DskipTests clean package"
                 }
             }
         }
-        stage('Test') { // Aunque los saltas, es bueno tener la etapa
+        stage('Test') {
             steps {
                 timeout(time: 10, unit: 'MINUTES') {
-                    sh "mvn test -DskipTests" // Actualmente saltando tests
+                    sh "mvn test -DskipTests"
                 }
             }
         }
-        stage('Sonar Analysis') { // Renombrado para claridad
+        stage('Sonar Analysis') {
             steps {
-                timeout(time: 10, unit: 'MINUTES') { // Aumentado un poco
-                    withSonarQubeEnv('sonarqube') { // Nombre de tu server SonarQube en Jenkins
+                timeout(time: 10, unit: 'MINUTES') {
+                    withSonarQubeEnv('sonarqube') {
                         sh "mvn org.sonarsource.scanner.maven:sonar-maven-plugin:3.9.0.2155:sonar -Pcoverage"
                     }
                 }
             }
         }
-        stage('Quality Gate') { // Renombrado para claridad
+        stage('Quality Gate') {
             steps {
-                // No es necesario un sleep aquí si SonarQube webhook está bien configurado o si el análisis es rápido.
-                // El waitForQualityGate ya tiene un timeout implícito.
-                timeout(time: 10, unit: 'MINUTES') { // Timeout para el quality gate en sí
+                timeout(time: 10, unit: 'MINUTES') {
                     waitForQualityGate abortPipeline: true
                 }
             }
         }
-        stage('Deploy Application') { // Renombrado para claridad
+        stage('Deploy Application') {
             steps {
                 echo "Iniciando despliegue de la aplicación con Docker Compose..."
-                // Navegamos al directorio donde está el docker-compose.yml de la aplicación
                 dir('docker') {
                     script {
-                        def dockerProjectName = "ecomapp" // Nombre de proyecto explícito para Docker Compose
+                        def dockerProjectName = "ecomapp"
 
                         try {
                             echo "Deteniendo y eliminando despliegue anterior (si existe)..."
-                            // Usar -p para especificar un nombre de proyecto consistente
-                            // Esto ayuda a asegurar que los nombres de volúmenes y redes sean predecibles.
                             sh "docker-compose -p ${dockerProjectName} down -v --remove-orphans --rmi local"
                             echo "Despliegue anterior detenido y limpiado."
 
-                            // Opcional: Eliminar explícitamente el volumen si down -v no es suficiente
-                            // El nombre del volumen será ${dockerProjectName}_mysql_data
                             echo "Intentando eliminar explícitamente el volumen ${dockerProjectName}_mysql_data..."
                             sh "docker volume rm ${dockerProjectName}_mysql_data || true"
                             echo "Intento de eliminación de volumen completado."
@@ -91,38 +82,45 @@ pipeline {
                             echo "Advertencia durante la limpieza: ${e.getMessage()} (Puede que no existiera nada que limpiar)."
                             echo "Continuando con el despliegue..."
                         }
-                     // --- INICIO DE VERIFICACIONES ANTES DEL DOCKER-COMPOSE UP ---
+                        
+                        // Mantenemos las verificaciones para confirmar que todo sigue bien antes del 'up'
                         echo "Verificando estructura de '../sql/' DESDE el directorio 'docker/' ANTES del docker-compose up:"
-                        // Estamos dentro de dir('docker'), así que '../sql/' es correcto para llegar a la carpeta sql en la raíz del workspace.
                         sh 'ls -la ../sql/'
                         sh '''
-                            if [ -d "../sql/init.sql" ]; then
-                              echo "ERROR PIPELINE: ../sql/init.sql ES UN DIRECTORIO justo antes del montaje."
-                            elif [ -f "../sql/init.sql" ]; then
+                            if [ -f "../sql/init.sql" ]; then
                               echo "OK PIPELINE: ../sql/init.sql ES UN ARCHIVO justo antes del montaje."
-                              echo "Primeras 5 líneas de ../sql/init.sql ANTES del montaje:"
-                              head -n 5 ../sql/init.sql
                             else
-                              echo "ADVERTENCIA PIPELINE: ../sql/init.sql no es ni un archivo ni un directorio, o no existe, justo antes del montaje."
+                              echo "ADVERTENCIA PIPELINE: ../sql/init.sql NO ES UN ARCHIVO justo antes del montaje."
                             fi
                         '''
-                        // --- FIN DE VERIFICACIONES ANTES DEL DOCKER-COMPOSE UP ---
 
-                        echo "Construyendo imágenes y levantando servicios..."
-                        // Usar -p aquí también para consistencia
-                        sh "docker-compose -p ${dockerProjectName} up -d --build"
+                        // ---------------------------------------------------------------------
+                        // --- CAMBIO CLAVE: Usar ruta absoluta para el volumen SQL ---
+                        // ---------------------------------------------------------------------
+                        // En lugar de llamar a 'docker-compose up' directamente, lo hacemos
+                        // dentro de un bloque 'sh' que primero exporta la variable de entorno
+                        // SQL_INIT_PATH. Esta variable contiene la ruta absoluta a tu carpeta 'sql'.
+                        // La variable ${WORKSPACE} es proporcionada por Jenkins automáticamente.
+                        echo "Construyendo imágenes y levantando servicios con ruta absoluta para el script SQL..."
+                        sh """
+                            export SQL_INIT_PATH=${WORKSPACE}/sql
+                            docker-compose -p ${dockerProjectName} up -d --build
+                        """
+                        // ---------------------------------------------------------------------
+                        // --- FIN DEL CAMBIO ---
+                        // ---------------------------------------------------------------------
+
                         echo "Comando 'docker-compose up' ejecutado."
 
                         echo "Esperando a que los servicios se estabilicen (60 segundos)..."
                         sleep(60)
                         
-                        echo "Verificando el script montado DENTRO del contenedor MySQL:"
+                        echo "Verificando el script montado DENTRO del contenedor MySQL (AHORA DEBERÍA FUNCIONAR):"
                         sh "docker exec mysql-ecommerce-prod ls -l /docker-entrypoint-initdb.d/"
-                        // Deberías ver '01-schema.sql'
                         
-                        sh '''docker exec mysql-ecommerce-prod sh -c 'if [ -d /docker-entrypoint-initdb.d/01-schema.sql ]; then echo "CONTENEDOR: 01-schema.sql ES UN DIRECTORIO"; elif [ -f /docker-entrypoint-initdb.d/01-schema.sql ]; then echo "CONTENEDOR: 01-schema.sql ES UN ARCHIVO"; else echo "CONTENEDOR: 01-schema.sql NO EXISTE O ES OTRO TIPO"; fi' '''
+                        sh '''docker exec mysql-ecommerce-prod sh -c 'if [ -f /docker-entrypoint-initdb.d/init.sql ]; then echo "¡ÉXITO! CONTENEDOR: init.sql ES UN ARCHIVO"; else echo "FALLO. CONTENEDOR: init.sql NO SE ENCONTRÓ O NO ES UN ARCHIVO"; fi' '''
                         
-                        sh "docker exec mysql-ecommerce-prod sh -c 'if [ -f /docker-entrypoint-initdb.d/01-schema.sql ]; then cat /docker-entrypoint-initdb.d/01-schema.sql | head -n 10; else echo \"No se puede mostrar cat porque no es un archivo.\"; fi' "
+                        sh "docker exec mysql-ecommerce-prod sh -c 'if [ -f /docker-entrypoint-initdb.d/init.sql ]; then cat /docker-entrypoint-initdb.d/init.sql | head -n 10; else echo \"No se puede mostrar cat porque no es un archivo.\"; fi' "
                         
                         echo "Logs del contenedor MySQL (mysql-ecommerce-prod) después del 'up':"
                         sh "docker logs mysql-ecommerce-prod"
@@ -131,14 +129,12 @@ pipeline {
                         sh "docker logs product_app"
 
                         echo "Despliegue completado. Aplicación y base de datos deberían estar corriendo."
-                        echo "App accesible (desde fuera de Docker) en http://<ip_de_tu_maquina_windows_o_agente_jenkins>:8084"
 
                         echo "Esperando 90 segundos adicionales antes del health check para la aplicación..."
-                        sleep(90) // Sleep más largo antes del health check
+                        sleep(90)
 
                         echo "Verificando salud de la aplicación..."
                         sh "curl -v -f --connect-timeout 10 --max-time 20 http://host.docker.internal:8084/actuator/health || exit 1"
-                        // -v para verbose output de curl, --connect-timeout y --max-time para controlar tiempos de curl
                         echo "Aplicación saludable."
                     }
                 }
@@ -148,15 +144,12 @@ pipeline {
     post {
         always {
             echo 'Pipeline finalizado.'
-            // Aquí podrías añadir pasos de limpieza si es necesario,
-            // aunque 'docker-compose down' en el inicio de Deploy debería manejarlo.
         }
         success {
             echo '¡Pipeline ejecutado con éxito!'
         }
         failure {
             echo 'Pipeline falló.'
-            // Podrías añadir notificaciones aquí
         }
     }
 }
